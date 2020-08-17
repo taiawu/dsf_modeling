@@ -7,6 +7,113 @@ library(shinycssloaders) # spinning plot loading icon
 library(shiny) # for shiny web-apps
 source("scripts/data_modeling.R")
 
+
+### time dependent probability function
+calc_time_dep_prob <- function(kf = 10,
+                               ku = 10,
+                               kl1 = 100,
+                               kl2 = 100,
+                               kd1 = 100,
+                               kd2 = 100,
+                               kir = 0.1) {
+    
+    #rate matrix: rows represent states, columns represent paths out of states
+    rates <- matrix(c(
+        0,ku,0,0,0,
+        kf,0,kl1,kir,0,
+        0,kd1,0,0,0,
+        0,0,0,0,kl2,
+        0,0,0,kd2,0), 
+        nrow = 5, ncol = 5, byrow = TRUE
+    )
+    
+    #transition boundary matrix
+    #boundary fraction likelihood of taking path out of state
+    # 0|xxxxxxxway1xxxxxxxx|yyyway2yyy|1
+    bounds <- matrix(c(
+        0,1,0,0,0,
+        kf/sum(kf,kl1,kir),0,sum(kf,kl1)/sum(kf,kl1,kir),1,0,
+        0,1,0,0,0,
+        0,0,0,0,1,
+        0,0,0,1,0), 
+        nrow = 5, ncol = 5, byrow = TRUE
+    )
+    
+    
+    #Summary of rates, for my own brain-functioning
+    # dfold/dt = kf(rev) - ku(fold)
+    # drev/dt = ku(fold) + kd1(revstar) - kl1(rev) - kf(rev) - kir(rev)
+    # drevstar/dt = kl1(rev) - kd1(revstar)
+    # dirrev/dt = kir(rev) + kd2(irrevstar) - kl2(irrev)
+    # dirrevstar/dt = kl2(irrev) - kd2(irrevstar)
+    
+    #foldS = exp(-ku * t)
+    #revS = exp(-(kl1 + kf + kir) * t)
+    #revstarS = exp(-kd1 * t)
+    #irrevS = exp(-kl2 * t)
+    #irrevstarS = exp(-kd2 * t)
+    
+    #set up algorithm
+    first_irrev <- c()
+    cycles <- 0
+    
+    while(cycles < 11){
+        explen <- 500
+        
+        t <- 0
+        state <- matrix(c(
+            1,0,0,0,0), 
+            nrow = 1, ncol = 5)
+        
+        #declare "time in each state" record
+        state_times <- c(0,0,0,0,0)
+        x <- 0
+        
+        
+        while(t < explen) {
+            #random number generation
+            u1 <- runif(1)
+            u2 <- runif(1)
+            
+            #set rates/bounds for that state
+            step_param <- state%*%rates
+            step_bound <- state%*%bounds
+            
+            #set next state to "unknown"
+            state <- state*0
+            
+            #step time
+            tstep <- -1/sum(step_param) * log(u1)
+            
+            #determine which state to move to, as determined by bounds
+            s <- 1
+            for(i in step_bound){
+                if(u2 < i){
+                    state[1,s] <- 1
+                    break
+                }
+                s <- s + 1
+            }
+            #add time spent in that state
+            state_times[s] <- state_times[s] + tstep
+            
+            #at what t does first transition to irreversibly unfolded occur?
+            if(s == 4 && x == 0){
+                print(t)
+                first_irrev <- c(first_irrev, t)
+                x <- 1
+            }
+            t <- t + tstep
+        }
+        
+        cycles <- cycles + 1
+    }
+    
+    list(state_times = state_times,
+         first_irrev = first_irrev,
+         state = s)
+}
+
 #### tdp3 functions
 calc_tdp3 <- function(kf, ku, kir) {
     #rate matrix: rows represent states, columns represent paths out of states
@@ -96,8 +203,42 @@ calc_tdp3 <- function(kf, ku, kir) {
 
 server <- function(session, input, output) { 
 
-########### tdp_3 model  ----------    
-output$tdp3_plot <- renderPlot({calc_tdp3(input$tdp_kf, input$tdp_ku, input$tdp_kir)})
+# #### time dependent model -----
+    time_dep_list <- eventReactive( input$simulate_time_dep, {
+                                            calc_time_dep_prob(kf = input$time_dep_kf,
+                                                               ku = input$time_dep_ku,
+                                                               kl1 = input$time_dep_kl1,
+                                                               kl2 = input$time_dep_kl2,
+                                                               kd1 = input$time_dep_kd1,
+                                                               kd2 = input$time_dep_kd2,
+                                                               kir = input$time_dep_kir)
+                                        })
+    
+    
+
+    output$state_time_plot <- renderPlot({
+        tibble(y  = time_dep_list()$state_times, cycle = c(1:length(time_dep_list()$state_times))) %>%
+            ggplot() + 
+            geom_point(aes(cycle, y), size = 5) +
+            labs(title = "Time Dependent Probability, State Times", y = "State Times", x = "Cycles")
+
+                                        })
+
+    output$first_irrev_plot <- renderPlot({
+        
+        tibble(y = time_dep_list()$first_irrev, cycle = c(1:length(time_dep_list()$first_irrev))) %>%
+            ggplot() + 
+            geom_point(aes(cycle, y ), size = 5) +
+            labs(title = "Time Dependent Probability, First Irreversible", y = "Time to first irreversible", x = "Cycles")
+                                            })
+    
+    
+########### tdp_3 model  ---------- 
+    tdp3_result <- eventReactive(input$simulate_tdp3, {
+        calc_tdp3(input$tdp_kf, input$tdp_ku, input$tdp_kir)
+    })
+    
+output$tdp3_plot <- renderPlot({ tdp3_result() })
     
 ########### LE models ----------
 df_model <-  reactive({
@@ -125,13 +266,15 @@ output$plot_model <- renderPlot(p_model())
 
 
 ui <- navbarPage(useShinyalert(),
+
                  tabPanel("TDP3",
                           sidebarLayout(
                               sidebarPanel(
                                   #input$tdp_kf, input$tdp_ku, input$tdp_kir
                                 sliderInput("tdp_kf", "K_f", min = 1, max = 1000, value = 100, step = 1),  
                                 sliderInput("tdp_ku", "K_u", min = 1, max = 1000, value = 100, step = 1),
-                                sliderInput("tdp_kir", "K_ir", min = 0.01, max = 100, value = 1, step = 0.01)
+                                sliderInput("tdp_kir", "K_ir", min = 0.01, max = 100, value = 1, step = 0.01),
+                                actionButton("simulate_tdp3", "Simulate!")
                                   
                               ), # end sidebarPanel
                               mainPanel(
@@ -139,7 +282,27 @@ ui <- navbarPage(useShinyalert(),
                               )
                           ) # end sidebar layout
                           ),
-                 tabPanel("Lumry-Eyring"
+                 tabPanel("Time Dependent",
+                          sidebarLayout(
+                              sidebarPanel(
+
+                                  sliderInput("time_dep_kf", "K_f", min = 1, max = 100, value = 10, step = 1),
+                                  sliderInput("time_dep_ku", "K_u", min = 1, max = 100, value = 10, step = 1),
+                                  sliderInput("time_dep_kl1", "K_l1", min = 0.01, max = 1000, value = 10, step = 1),
+                                  sliderInput("time_dep_kl2", "Kl2", min = 0.01, max = 1000, value = 10, step = 1),
+                                  sliderInput("time_dep_kd1", "K_d1", min = 0.01, max = 1000, value = 10, step = 1),
+                                  sliderInput("time_dep_kd2", "K_d2", min = 0.01, max = 1000, value = 10, step = 1),
+                                  sliderInput("time_dep_kir", "K_ir", min = 0.01, max = 100, value = 1, step = 0.01),
+                 actionButton("simulate_time_dep", "Simulate!")
+                
+                              ), # end sidebarPanel
+                              mainPanel(
+                                  plotOutput("state_time_plot") %>% withSpinner(color="#525252"),
+                                  plotOutput("first_irrev_plot") %>% withSpinner(color="#525252")
+                              )
+                          ) # end sidebar layout
+                 ),
+                 tabPanel("Lumry-Eyring",
                           tags$head( # set the slider aesthetic
                               tags$style(
                                   ".js-irs-0 .irs-single, .js-irs-0 .irs-bar-edge, .js-irs-0 .irs-bar {background: grey; border-color: transparent;}",
@@ -220,21 +383,11 @@ ui <- navbarPage(useShinyalert(),
                                   
                               ),
                               mainPanel(
-                                  p("Welcome to DSF world", style = "font-family: 'Avenir Next'; font-size: 8px; color: white",align = "center"),
-                                  shiny::div(tags$img(src = "20191108_dsfworld_modeling_scheme_v0.png", width = "100%"), style = "text-align: center;"),
-                                  p("Welcome to DSF world", style = "font-family: 'Avenir Next'; font-size: 8px; color: white",align = "center"),
                                   plotOutput("plot_model", width = "100%", height = "400px")
                               ))
                           
-                 ), # end fluidRow
-                 
-                 tabPanel(p("about the model", style = "font-family: 'Avenir Next'; font-size: 14px; color: black",align = "center"), value = "learn_about_model",
-                          
-                          p("about the model", style = "font-family: 'Avenir Next'; font-size: 25px; color: white",align = "center"),
-                          shiny::div(tags$iframe(src = "20200505_dsfworld_about_the_model.pdf", width = "100%", height = "500px"), style = "text-align: center;")
-                          #shiny::div(tags$iframe(src = "dsfworld_about_the_model.pdf", width = "100%", height = "500px"), style = "text-align: center;"),
-                          
                  )
+
                  )
 
 
